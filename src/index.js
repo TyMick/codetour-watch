@@ -69,10 +69,11 @@ const run = async () => {
             }
         });
 
-        // Comment PR if action is not silenced and a CodeTour is affected
-        if (!isSilentMode && impactedTours.length > 0) {
-            await commentPr(
-                octokit,
+        let commentInfo = null;
+        // Comment PR if a CodeTour is affected
+        if (impactedTours.length > 0) {
+            // Still format comment for Action output even in silent mode
+            commentInfo = formatPrComment(
                 commentId
                     ? {
                           owner,
@@ -88,9 +89,21 @@ const run = async () => {
                 impactedTours,
                 missingTourUpdates
             );
+
+            if (!isSilentMode) {
+                if (commentInfo.comment_id === undefined) {
+                    await octokit.rest.issues.createComment(commentInfo);
+                } else {
+                    await octokit.rest.issues.updateComment(commentInfo);
+                }
+            }
         }
 
-        // Set action ouput
+        // Set action output
+        core.setOutput(
+            'commentInfoJson',
+            JSON.stringify(commentInfo).replace(/\\/g, '\\\\') // Encode for Action output
+        );
         core.setOutput('impactedFiles', impactedFiles);
         core.setOutput('impactedTours', impactedTours);
         core.setOutput('missingTourUpdates', missingTourUpdates);
@@ -129,15 +142,14 @@ const getCodeTourWatchComment = async (octokit, owner, repo, prNumber) => {
 };
 
 /**
- * Creates/updates a comment with a CodeTour watch report
- * @param {object} octokit
+ * Formats a comment with a CodeTour watch report
  * @param {object} commentInfo
  * @param {string[]} impactedFiles
  * @param {string[]} impactedTours
  * @param {string[]} missingTourUpdates
+ * @returns {object} the request body to send when creating/updating the PR comment
  */
-const commentPr = async (
-    octokit,
+const formatPrComment = (
     commentInfo,
     impactedFiles,
     impactedTours,
@@ -161,11 +173,7 @@ Changed files with possible CodeTour impact:\n\n`;
     body += `\nMake sure to review CodeTour files and update line numbers accordingly.`;
     commentInfo.body = body;
 
-    if (commentInfo.comment_id === undefined) {
-        await octokit.rest.issues.createComment(commentInfo);
-    } else {
-        await octokit.rest.issues.updateComment(commentInfo);
-    }
+    return commentInfo;
 };
 
 /**

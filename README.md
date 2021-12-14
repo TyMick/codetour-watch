@@ -44,6 +44,7 @@ jobs:
 
 | Name                 | Description                                                                          |
 | -------------------- | ------------------------------------------------------------------------------------ |
+| `commentInfoJson`    | A JSON string of the comment create/update request body (or `"null"` if no code tours are affected), in case you need to make the request in a separate workflow. |
 | `impactedFiles`      | The list of files covered by tours that were changed.                                |
 | `impactedTours`      | The list of tours that were impacted by the PR.                                      |
 | `missingTourUpdates` | The list of tours that were impacted by the changes but that are not part of the PR. |
