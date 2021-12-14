@@ -14,6 +14,13 @@ inputs:
         description: 'Optional flag that specifies a custom `.tour` folder location.'
         required: false
         default: '.tours/'
+outputs:
+    impactedFiles:
+        description: 'The list of files covered by tours that were changed.'
+    impactedTours:
+        description: 'The list of tours that were impacted by the PR.'
+    missingTourUpdates:
+        description: 'The list of tours that were impacted by the changes but that are not part of the PR.'
 
 runs:
     using: 'node12'
