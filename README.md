@@ -12,7 +12,10 @@ The action will not comment the PR if changes do not impact CodeTour.
 
 ## Usage
 
+If you want PR comments and will only be receiving PRs from the original repo:
+
 ```yml
+# .github/workflows/codetour-watch.yml
 name: CodeTour watch
 
 on:
@@ -32,6 +35,55 @@ jobs:
                   repo-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
+If you want PR comments and will be receiving PRs from forked repos, you'll need to create a separate workflow to make the actual comment create/update API request:
+
+```yml
+# .github/workflows/codetour-watch.yml
+name: CodeTour watch
+
+on:
+    pull_request:
+        types: [opened, edited, synchronize, reopened]
+
+jobs:
+    codetour-watch:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout source code
+              uses: actions/checkout@v2
+
+            - name: Watch CodeTour changes
+              id: codetour-watch
+              uses: TyMick/codetour-watch@v1.6.0-fork.2
+              with:
+                  silent: true
+                  create-artifact: true
+```
+
+```yml
+# .github/workflows/codetour-watch-comment.yml
+name: PR comment for CodeTour watch
+
+on:
+    workflow_run:
+        workflows: ['CodeTour watch']
+        types: [completed]
+
+jobs:
+    comment:
+        runs-on: ubuntu-latest
+        if: >
+            ${{ github.event.workflow_run.event == 'pull_request' &&
+            github.event.workflow_run.conclusion == 'success' }}
+        env:
+        steps:
+            - name: Watch CodeTour changes
+              id: codetour-watch
+              uses: TyMick/codetour-watch@v1.6.0-fork.2
+              with:
+                  from-artifact: true
+```
+
 ## Inputs
 
 | Name         | Required | Description                                                     | Default                |
@@ -42,9 +94,9 @@ jobs:
 
 ## Outputs
 
-| Name                 | Description                                                                          |
-| -------------------- | ------------------------------------------------------------------------------------ |
+| Name                 | Description                                                                                                                                                       |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `commentInfoJson`    | A JSON string of the comment create/update request body (or `"null"` if no code tours are affected), in case you need to make the request in a separate workflow. |
-| `impactedFiles`      | The list of files covered by tours that were changed.                                |
-| `impactedTours`      | The list of tours that were impacted by the PR.                                      |
-| `missingTourUpdates` | The list of tours that were impacted by the changes but that are not part of the PR. |
+| `impactedFiles`      | The list of files covered by tours that were changed.                                                                                                             |
+| `impactedTours`      | The list of tours that were impacted by the PR.                                                                                                                   |
+| `missingTourUpdates` | The list of tours that were impacted by the changes but that are not part of the PR.                                                                              |

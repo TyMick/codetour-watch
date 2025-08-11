@@ -1,6 +1,8 @@
+const artifact = require('@actions/artifact');
 const core = require('@actions/core');
 const github = require('@actions/github');
 const fs = require('fs');
+const zlib = require('zlib');
 const path = require('path');
 
 const DEFAULT_TOUR_PATH = '.tours/';
@@ -17,6 +19,15 @@ const run = async () => {
         const tourRootPath = core.getInput('tour-path')
             ? core.getInput('tour-path')
             : DEFAULT_TOUR_PATH;
+        const shouldCreateArtifact =
+            core.getInput('create-artifact') &&
+            core.getInput('create-artifact').toLowerCase() === 'true';
+        const fromArtifact =
+            core.getInput('from-artifact') &&
+            core.getInput('from-artifact').toLowerCase() === 'true';
+
+        if (shouldCreateArtifact && fromArtifact)
+            throw new Error('Cannot create and use artifact in the same step');
 
         // Get octokit REST client
         const octokit = github.getOctokit(gitHubToken);
@@ -36,44 +47,21 @@ const run = async () => {
             number
         );
 
-        // Get PR changed files
-        const prFiles = await getPrFiles(octokit, {
-            owner,
-            repo,
-            pull_number: number
-        });
+        const { impactedFiles, impactedTours, missingTourUpdates } =
+            fromArtifact
+                ? await getArtifactInfo()
+                : await getTourDriftInfo(
+                      octokit,
+                      owner,
+                      repo,
+                      number,
+                      tourRootPath
+                  );
 
-        // Parse CodeTour definitions
-        const tourDefinitions = [];
-        await loadToursFromDirectory(tourRootPath, tourDefinitions);
-
-        // Get files covered by CodeTour
-        const touredFiles = getFilesCoveredByCodetour(tourDefinitions);
-
-        // Get CodeTour files modified in PR
-        const impactedFiles = prFiles
-            .filter((file) => touredFiles.indexOf(file) !== -1)
-            .sort();
-
-        // Get CodeTour files that are impacted by update
-        const impactedTours = getCodetourFromFiles(
-            tourDefinitions,
-            impactedFiles
-        );
-
-        // Find impacted CodeTour files that are not updated in PR
-        const missingTourUpdates = [];
-        impactedTours.forEach((impactedTour) => {
-            if (prFiles.indexOf(impactedTour) === -1) {
-                missingTourUpdates.push(impactedTour);
-            }
-        });
-
-        let commentInfo = null;
-        // Comment PR if a CodeTour is affected
-        if (impactedTours.length > 0) {
-            // Still format comment for Action output even in silent mode
-            commentInfo = formatPrComment(
+        // Comment PR if action is not silenced and a CodeTour is affected
+        if (!isSilentMode && impactedTours.length > 0) {
+            await commentPr(
+                octokit,
                 commentId
                     ? {
                           owner,
@@ -89,21 +77,32 @@ const run = async () => {
                 impactedTours,
                 missingTourUpdates
             );
+        }
 
-            if (!isSilentMode) {
-                if (commentInfo.comment_id === undefined) {
-                    await octokit.rest.issues.createComment(commentInfo);
-                } else {
-                    await octokit.rest.issues.updateComment(commentInfo);
-                }
-            }
+        if (shouldCreateArtifact) {
+            fs.mkdirSync('./pr');
+            fs.writeFileSync(
+                './pr/codetourWatch.json',
+                JSON.stringify({
+                    impactedFiles,
+                    impactedTours,
+                    missingTourUpdates
+                }).replace(/\\/g, '\\\\') // Encode for external use
+            );
+
+            const artifactClient = artifact.create();
+            const artifactName = 'codetourWatch';
+            const artifactFiles = ['pr/codetourWatch.json'];
+            const rootDirectory = '.';
+            await artifactClient.uploadArtifact(
+                artifactName,
+                artifactFiles,
+                rootDirectory,
+                { continueOnError: false }
+            );
         }
 
         // Set action output
-        core.setOutput(
-            'commentInfoJson',
-            JSON.stringify(commentInfo).replace(/\\/g, '\\\\') // Encode for Action output
-        );
         core.setOutput('impactedFiles', impactedFiles);
         core.setOutput('impactedTours', impactedTours);
         core.setOutput('missingTourUpdates', missingTourUpdates);
@@ -142,14 +141,96 @@ const getCodeTourWatchComment = async (octokit, owner, repo, prNumber) => {
 };
 
 /**
- * Formats a comment with a CodeTour watch report
+ * @param {object} octokit
+ * @param {string} owner
+ * @param {string} repo
+ * @returns {{
+ *     impactedFiles: string[],
+ *     impactedTours: string[],
+ *     missingTourUpdates: string[]
+ * }}
+ */
+const getArtifactInfo = async (octokit, owner, repo) => {
+    const artifacts = await octokit.paginate(
+        octokit.rest.actions.listWorkflowRunArtifacts,
+        {
+            owner,
+            repo,
+            run_id: github.context.payload.workflow_run.id
+        }
+    );
+    const matchedArtifact = artifacts.data.artifacts.filter(
+        (artifact) => artifact.name == 'codetourWatch'
+    )[0];
+    const download = await octokit.rest.actions.downloadArtifact({
+        owner,
+        repo,
+        artifact_id: matchedArtifact.id,
+        archive_format: 'zip'
+    });
+    /** @todo Fix by writing to a file first */
+    const artifactString = zlib
+        .unzipSync(Buffer.from(download.data))
+        .toString();
+    return JSON.parse(artifactString);
+};
+
+/**
+ * @param {object} octokit
+ * @param {string} owner
+ * @param {string} repo
+ * @param {number} number
+ * @param {string} tourRootPath
+ * @returns {{
+ *     impactedFiles: string[],
+ *     impactedTours: string[],
+ *     missingTourUpdates: string[]
+ * }}
+ */
+const getTourDriftInfo = async (octokit, owner, repo, number, tourRootPath) => {
+    // Get PR changed files
+    const prFiles = await getPrFiles(octokit, {
+        owner,
+        repo,
+        pull_number: number
+    });
+
+    // Parse CodeTour definitions
+    const tourDefinitions = [];
+    await loadToursFromDirectory(tourRootPath, tourDefinitions);
+
+    // Get files covered by CodeTour
+    const touredFiles = getFilesCoveredByCodetour(tourDefinitions);
+
+    // Get CodeTour files modified in PR
+    const impactedFiles = prFiles
+        .filter((file) => touredFiles.indexOf(file) !== -1)
+        .sort();
+
+    // Get CodeTour files that are impacted by update
+    const impactedTours = getCodetourFromFiles(tourDefinitions, impactedFiles);
+
+    // Find impacted CodeTour files that are not updated in PR
+    const missingTourUpdates = [];
+    impactedTours.forEach((impactedTour) => {
+        if (prFiles.indexOf(impactedTour) === -1) {
+            missingTourUpdates.push(impactedTour);
+        }
+    });
+
+    return { impactedFiles, impactedTours, missingTourUpdates };
+};
+
+/**
+ * Creates/updates a comment with a CodeTour watch report
+ * @param {object} octokit
  * @param {object} commentInfo
  * @param {string[]} impactedFiles
  * @param {string[]} impactedTours
  * @param {string[]} missingTourUpdates
- * @returns {object} the request body to send when creating/updating the PR comment
  */
-const formatPrComment = (
+const commentPr = async (
+    octokit,
     commentInfo,
     impactedFiles,
     impactedTours,
@@ -173,7 +254,11 @@ Changed files with possible CodeTour impact:\n\n`;
     body += `\nMake sure to review CodeTour files and update line numbers accordingly.`;
     commentInfo.body = body;
 
-    return commentInfo;
+    if (commentInfo.comment_id === undefined) {
+        await octokit.rest.issues.createComment(commentInfo);
+    } else {
+        await octokit.rest.issues.updateComment(commentInfo);
+    }
 };
 
 /**
